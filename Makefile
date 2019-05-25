@@ -11,11 +11,11 @@ dropbox_client.o : dropbox_client.c
 	gcc -c dropbox_client.c
 
 dropbox_server : dropbox_server.o list.o
-	gcc -o dropbox_server dropbox_server.o list.o -g3 -Wall
+	gcc -o dropbox_server dropbox_server.o list.o -g -Wall
 
 
 dropbox_client : dropbox_client.o list.o
-	gcc -o dropbox_client dropbox_client.o list.o -g3 -Wall
+	gcc -o dropbox_client dropbox_client.o list.o -g -Wall
 
 clean :
 	rm dropbox_client dropbox_server dropbox_server.o dropbox_client.o list.o

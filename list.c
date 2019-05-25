@@ -7,15 +7,14 @@
 
 #include "list.h"
 
-int counter_nodes(client_list* L ,uint16_t port ,uint32_t ip )
+int counter_nodes(client_list* L )
 {
 	client_list* temp;
 	temp = L;
 	int counter = 0;
 	while(temp != NULL)
 	{
-		if ( (temp->ip != ip ) || (temp->port != port) )
-			counter++;
+		counter++;
 		temp = temp->next_node;
 	}
 	return counter;
@@ -66,21 +65,22 @@ int insert_node(client_list ** L , uint16_t port , uint32_t ip)
 }
 
 
-void delete_node(client_list** L , uint16_t port , uint32_t ip )
+int delete_node(client_list** L , uint16_t port , uint32_t ip )
 {
 	struct list_node* temp;
 	while (*L != NULL)
-	{
+	{	
 		if ( ((*L)->port == port) && ((*L)->ip == ip) )
 		{
 			temp = *L;
 			*L = (*L)->next_node;
 			free(temp);
-			return;
+			return 1;
 		}
 		else
 			L = &((*L)->next_node);
 	}
+	return 0;
 }
 
 void destroy_list(client_list** L)

@@ -18,6 +18,9 @@
 
 #include <signal.h>
 
+#include <errno.h>
+extern int errno;
+
 #include "list_interface.h"
 
 #define CONNECTIONS 10
@@ -27,6 +30,11 @@ int terminate = 0;
 void sigint_handler(int sig)
 {
 	terminate = 1;
+}
+
+void sigpipe_handler(int sig)
+{
+	printf("SIGPIPE\n");
 }
 
 void new_connection(int , int*);
@@ -48,6 +56,7 @@ int main(int argc , char* argv[])
 	struct hostent *rem;
 
 	signal(SIGINT, sigint_handler);
+	signal(SIGPIPE,sigpipe_handler);
 
 	if ( !strcmp(argv[1],"-p") )
 		port = atoi(argv[2]);
@@ -105,6 +114,7 @@ int main(int argc , char* argv[])
     	read_set = set;
 
     	int ready = 0;
+    	//ready = select(fd_max+1, &read_set, NULL, NULL, NULL) ;
       	if ( (ready = select(fd_max+1, &read_set, NULL, NULL, NULL) ) < 0)
         {
         	fprintf(stderr,"Error in select\n");
@@ -139,7 +149,7 @@ int main(int argc , char* argv[])
         		}
         		else
         		{	
-        			if (service_request(fd,&clients) < 0)
+        			if (service_request(fd,&clients) <= 0)
         			{
         				FD_CLR(fd,&set);
         				if (fd == fd_max)
@@ -157,7 +167,7 @@ int main(int argc , char* argv[])
 	return 0;
 }
 
-void send_client_details(client_list* clients,uint16_t client_port,uint32_t client_ip)
+int user_on(client_list* clients,uint16_t client_port,uint32_t client_ip)
 {
 	int sock;
 	char buf[64];
@@ -170,15 +180,175 @@ void send_client_details(client_list* clients,uint16_t client_port,uint32_t clie
 
     client_list* temp;
     temp = clients;
-
+    printf("IN USER ON\n");
 	while(temp != NULL)
 	{	
 		if( (temp->ip != client_ip) || (temp->port != client_port) )
 		{	
 			if ((sock = socket(PF_INET, SOCK_STREAM, 0)) < 0)
 			{
-				fprintf(stderr,"Error in socket\n");
-				return;
+				fprintf(stderr,"Error in socket in user_on.\n");
+				close(sock);
+				return -1;
+			}
+				
+			bzero(&server, sizeof(server));
+    		server.sin_family = AF_INET;       /* Internet domain */
+    		server.sin_port = htons(temp->port); /* Server port */
+  			server.sin_addr.s_addr = temp->ip;//htonl(temp->ip);
+  			printf("without htonl:   %d\n",temp->ip );
+  			printf("with    htonl:	 %d\n",htonl(temp->ip) );
+
+			if (connect(sock, serverptr, sizeof(server)) < 0)
+			{
+				fprintf(stderr,"Error in connect in user_on.\n");
+				close(sock);
+				return -1;				
+			}
+
+			strcpy(buf,"USER_ON");
+			
+			bytes = write(sock,buf,strlen(buf)+1);
+			if (bytes < 0)
+			{
+				fprintf(stderr,"Error in write in user_on.\n");
+				close(sock);
+				return -1;	
+			}
+
+			ip = htonl(client_ip);
+			port = htons(client_port);
+
+			bytes = write(sock,&ip,sizeof(ip));
+			if (bytes < 0)
+			{
+				fprintf(stderr,"Error in write in user_on.\n");
+				close(sock);
+				return -1;	
+			}
+
+			bytes = write(sock,&port,sizeof(port));
+			if (bytes < 0)
+			{
+				fprintf(stderr,"Error in write in user_on.\n");
+				close(sock);
+				return -1;	
+			}
+
+			close(sock);			
+		}
+
+		temp = temp->next_node;
+	}
+	printf("END OF USER ON\n");
+	return 0;
+}
+
+int log_on(client_list** clients,int socket)
+{	
+	int insert = 0;
+	uint32_t client_ip=0;
+	int bytes = read(socket,&client_ip,sizeof(client_ip));
+	if (bytes < 0)
+	{	
+		fprintf(stderr,"Error in read in log_on.\n");
+		return -1;
+	}
+	//printf("%d\n",client_ip );
+		
+	client_ip = ntohl(client_ip); 
+		
+	struct in_addr ip_addr;
+    ip_addr.s_addr = client_ip;
+		
+	uint16_t client_port;
+	bytes = read(socket,&client_port,sizeof(client_port));
+	if (bytes < 0)
+	{	
+		fprintf(stderr,"Error in read in log_on.\n");
+		return -1;
+	}
+	//printf("%d\n",client_port );
+	client_port = ntohs(client_port);
+	//printf("%d %d\n",client_ip, client_port );
+		
+	//printf("%s %d\n",inet_ntoa(ip_addr),client_port );
+
+	insert = insert_node(clients,client_port, client_ip);
+	if (insert == 1)
+		if (user_on(*clients,client_port,client_ip) < 0)
+			return -1;	
+
+	return 0;
+
+}
+
+int get_clients(client_list** clients,int socket)
+{
+	char buf[32];
+	int bytes;
+
+	int nodes = counter_nodes(*clients);
+	sprintf(buf,"CLIENT_LIST %d",nodes);
+
+
+	bytes = write(socket,buf,strlen(buf)+1);
+	if (bytes < 0)
+	{
+		fprintf(stderr,"Error in write in get_clients.\n");
+		return -1;
+	}
+
+	client_list* temp; 
+	temp = *clients;
+
+	uint16_t port;
+	uint32_t ip;
+	while(temp != NULL)
+	{	
+		ip = htonl(temp->ip);
+		bytes = write(socket, &ip , sizeof(ip) );
+		if (bytes < 0)
+		{
+			fprintf(stderr,"Error in write in get_clients.\n");
+			return -1 ;
+		}
+
+		port = htons(temp->port);
+		bytes = write(socket,&port, sizeof(port)) ;
+		if (bytes < 0)
+		{
+			fprintf(stderr,"Error in write in get_clients.\n");
+			return -1;
+		}
+		temp = temp->next_node;		
+	}
+	return 0;
+}
+
+int user_off(client_list* clients,uint16_t client_port,uint32_t client_ip)
+{
+	int sock;
+	char buf[64];
+	int bytes;
+	struct sockaddr_in server;
+    struct sockaddr *serverptr = (struct sockaddr*)&server;
+
+    uint32_t ip;
+    uint16_t port;
+
+    client_list* temp;
+    temp = clients;
+    printf("IN USER OFF\n");
+	while(temp != NULL)
+	{	
+		if( (temp->ip != client_ip) || (temp->port != client_port) )
+		{	
+			if ((sock = socket(PF_INET, SOCK_STREAM, 0)) < 0)
+			{
+				fprintf(stderr,"Error in socket in user_off.\n");
+				close(sock);
+				return -1;
 			}
 				
 			bzero(&server, sizeof(server));
@@ -188,17 +358,19 @@ void send_client_details(client_list* clients,uint16_t client_port,uint32_t clie
 
 			if (connect(sock, serverptr, sizeof(server)) < 0)
 			{
-				fprintf(stderr,"Error in connect\n");
-				return;				
+				fprintf(stderr,"Error in connect in user_off.\n");
+				close(sock);
+				return -1;				
 			}
 
-			strcpy(buf,"USER_ON ");
+			strcpy(buf,"USER_OFF");
 			
-			bytes = write(sock,buf,strlen(buf));
+			bytes = write(sock,buf,strlen(buf)+1);
 			if (bytes < 0)
 			{
-				fprintf(stderr,"Error in write\n");
-				return;	
+				fprintf(stderr,"Error in write in user_off.\n");
+				close(sock);
+				return -1;	
 			}
 
 			ip = htonl(client_ip);
@@ -207,15 +379,17 @@ void send_client_details(client_list* clients,uint16_t client_port,uint32_t clie
 			bytes = write(sock,&ip,sizeof(ip));
 			if (bytes < 0)
 			{
-				fprintf(stderr,"Error in write\n");
-				return;	
+				fprintf(stderr,"Error in write in user_off.\n");
+				close(sock);
+				return -1;	
 			}
 
 			bytes = write(sock,&port,sizeof(port));
 			if (bytes < 0)
 			{
-				fprintf(stderr,"Error in write\n");
-				return;	
+				fprintf(stderr,"Error in write in user_off.\n");
+				close(sock);
+				return -1;	
 			}
 
 			close(sock);			
@@ -223,6 +397,52 @@ void send_client_details(client_list* clients,uint16_t client_port,uint32_t clie
 
 		temp = temp->next_node;
 	}
+	printf("END OF USER_OFF\n");
+	return 0;
+}
+
+int log_off(client_list** clients,int socket)
+{
+	int del = 0;
+	uint32_t client_ip=0;
+	int bytes = read(socket,&client_ip,sizeof(client_ip));
+	if (bytes < 0)
+	{	
+		fprintf(stderr,"Error in read in log_off.\n");
+		return -1;
+	}
+//	printf("%d\n",client_ip );
+		
+	client_ip = ntohl(client_ip); 
+		
+	struct in_addr ip_addr;
+    ip_addr.s_addr = client_ip;
+		
+	uint16_t client_port;
+	bytes = read(socket,&client_port,sizeof(client_port));
+	if (bytes < 0)
+	{	
+		fprintf(stderr,"Error in read in log_off.\n");
+		return -1;
+	}
+	client_port = ntohs(client_port);
+	//printf("%d %d\n",client_ip, client_port );
+		
+//	printf("%s %d\n",inet_ntoa(ip_addr),client_port );
+
+	del = delete_node(clients,client_port, client_ip);
+
+	if (del == 1)
+	{	if (user_off(*clients,client_port,client_ip) < 0)
+			return -1;
+	}
+	else
+	{
+		printf("ERROR_IP_PORT_NOT_FOUND_IN_LIST\n");
+		return -2;
+	}	
+
+	return 0;
 }
 
 int service_request(int socket, client_list ** clients)
@@ -230,14 +450,13 @@ int service_request(int socket, client_list ** clients)
 	char request[16];
 	int i = 0;
 	int read_bytes = 0;
-	int insert = 0;
-	char ch = '\0';
+	char ch = 'a';
 
-	while(ch != ' ')
+	while(ch != '\0')
 	{	read_bytes = read(socket,request + i ,1);
 		if (read_bytes < 0)
 		{	
-			fprintf(stderr,"Error in read\n");
+			fprintf(stderr,"Error in read in service_request.\n");
 			return -2;
 		}
 		if (read_bytes == 0)
@@ -245,43 +464,22 @@ int service_request(int socket, client_list ** clients)
 		ch = request[i];
 		i++;
 	}
-	request[i-1] = '\0';
 	printf("%s\n",request);
 
 	if (!strcmp(request,"LOG_ON"))
 	{	
-		uint32_t client_ip=0;
-		int bytes = read(socket,&client_ip,sizeof(client_ip));
-
-		
-		printf("%d\n",client_ip );
-		
-		client_ip = ntohl(client_ip); 
-		
-		struct in_addr ip_addr;
-    	ip_addr.s_addr = client_ip;
-		
-
-		uint16_t client_port;
-		bytes = read(socket,&client_port,sizeof(client_port));
-
-		client_port = ntohs(client_port);
-		//printf("%d %d\n",client_ip, client_port );
-		
-		printf("%s %d\n",inet_ntoa(ip_addr),client_port );
-
-		insert = insert_node(clients,client_port, client_ip);
-		if (insert == 1)
-			send_client_details(*clients,client_port,client_ip);
-
+		if (log_on(clients,socket) < 0)
+			return -1;
 	}
 	else if (!strcmp(request,"GET_CLIENTS"))
 	{
-		int counter = counter_nodes(*clients , port ,uint32_t ip )
+		if (get_clients(clients,socket) < 0)
+			return -1;
 	}
 	else if (!strcmp(request,"LOG_OFF"))
 	{
-
+		if( log_off(clients,socket) < 0)
+			return -1;
 	}
 	else
 		printf("Invalid request.\n");
@@ -290,48 +488,3 @@ int service_request(int socket, client_list ** clients)
 	return 0;
 }
 
-
-void new_connection(int sock, int* connected_socks)
-{
-	int connection = accept(sock, NULL, NULL);
-	printf("%d\n",connection );
-	if (connection < 0) 
-	{
-		fprintf(stderr, "Error in accept\n");
-		return;
-	}
-
-	int opts = fcntl(sock,F_GETFL);
-	if (opts < 0)
-	{
-		fprintf(stderr,"fcntl(F_GETFL)\n");
-		return;
-	}
-
-	opts = (opts | O_NONBLOCK);
-	if (fcntl(sock,F_SETFL,opts) < 0) 
-	{
-		fprintf(stderr,"fcntl(F_SETFL)\n");
-		return;
-	}
-
-	for (int num = 0; (num < CONNECTIONS) && (connection != -1); num ++)
-	{	if (connected_socks[num] == 0) 
-		{
-			printf("Connection accepted:   FD=%d; Slot=%d\n",connection,num);
-			connected_socks[num] = connection;
-			connection = -1;
-		}
-	}
-	
-	if (connection != -1) 
-	{
-		/* No room left in the queue! */
-		printf("\nNo room left for new client.\n");
-		char buffer[256];
-		strcpy(buffer,"Sorry, this server is too busy. Try again later!\r\n");
-		write(connection,buffer,strlen(buffer)+1);
-		close(connection);
-	}
-	return;
-}
