@@ -94,3 +94,16 @@ void destroy_list(client_list** L)
 		free(temp);
 	}
 }
+
+void print_list(client_list * L )
+{
+	client_list* temp;
+
+	temp = L;
+	printf("LIST: \n");
+	while(temp != NULL)
+	{
+		printf("IP: %d PORT: %d\n",temp->ip,temp->port);
+		temp = temp->next_node;
+	}
+}

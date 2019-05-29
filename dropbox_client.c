@@ -13,13 +13,21 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
+#include <pthread.h>
+
 #include <signal.h>
+#include <errno.h>
+
+extern int errno;
 
 #include <fcntl.h>
 
 #include "list_interface.h"
+#include "client_functions.h"
+#include "buffer_interface.h"
 
 #define CONNECTIONS 10
+#define THREAD_NUMBER 100
 
 int terminate = 0;
 
@@ -28,10 +36,42 @@ void sigint_handler(int sig)
 	terminate = 1;
 }
 
-int service_request(int ,client_list**);
-int log_on(struct sockaddr *,char *,uint16_t);
-int log_off(struct sockaddr *,char* ,uint16_t );
-int get_clients(struct sockaddr *,char*,uint16_t,client_list**);
+int service_request(int ,client_list**,char*);
+
+client_list * clients ;
+buffer  shared_buffer ;
+pthread_mutex_t mtx;
+pthread_mutex_t list_mtx;
+pthread_cond_t cond_nonempty;
+pthread_cond_t cond_nonfull;
+
+static void cleanup_handler(void* arg)
+{
+	pthread_mutex_unlock(&mtx);
+}
+
+void* worker(void* ptr)
+{
+	pthread_cleanup_push(cleanup_handler,NULL);
+	while(terminate == 0)
+	{
+		buffer_item* item = NULL;
+		item = obtain(&shared_buffer);
+		pthread_cond_signal(&cond_nonfull);
+		if ( ( !strcmp(item->pathname,"\0")) && (item->version == 0))
+		{
+			send_get_file_list(item);
+		}
+		else
+		{
+			printf("NEXT STEP:\n");
+			//send_get_file();
+		}
+		free(item);
+	}
+	pthread_cleanup_pop(0);
+	return NULL;
+}
 
 int main(int argc , char* argv[])
 {
@@ -42,7 +82,7 @@ int main(int argc , char* argv[])
 	}
 
 	uint16_t 		port;
-    int             sock_request , listening_sock;
+    int             listening_sock;
     char            buf[256];
     struct sockaddr_in server, client;
     struct sockaddr *serverptr = (struct sockaddr*)&server;
@@ -138,24 +178,81 @@ int main(int argc , char* argv[])
 
     char * IPstring;
     struct hostent *host_entry; 
-    int hostname = gethostname(buf, sizeof(buf)); 
+    gethostname(buf, sizeof(buf)); 
     host_entry = gethostbyname(buf); 
     IPstring = inet_ntoa(*((struct in_addr*) host_entry->h_addr_list[0])); 
 
-	if ( log_on(serverptr,IPstring,port) < 0)
+    uint32_t ip = inet_addr(IPstring);
+
+	if ( log_on(serverptr,IPstring,ip,port) < 0)
 	{
    		free(dirname);
 		free(server_ip);
 		return -3;		
 	}
 
-   	client_list * clients = NULL;
-
-	if ( get_clients(serverptr,IPstring,port,&clients) < 0)
+	if ( get_clients(serverptr,IPstring,ip,port,&clients) < 0)
 	{
    		free(dirname);
 		free(server_ip);
 		return -3;		
+	}
+
+	initialize_buffer(&shared_buffer,buffer_size);
+	pthread_mutex_init(&mtx, 0);
+	pthread_mutex_init(&list_mtx, 0);
+	pthread_cond_init(&cond_nonempty, 0);
+	pthread_cond_init(&cond_nonfull, 0);
+
+	pthread_mutex_lock(&list_mtx);
+	client_list* temp = clients;
+	while(temp != NULL)
+	{
+		buffer_item * item = (buffer_item*) malloc(sizeof(buffer_item));
+		if (item == NULL)
+		{
+			fprintf(stderr, "Error in malloc in dropbox_client.c\n");
+			free(dirname);
+			free(server_ip);
+			return -2;
+		}
+
+		item->ip = temp->ip;
+		item->port = temp->port;
+		item->pathname[0] = '\0';
+		item->version = 0;
+		place(&shared_buffer , item) ;
+		pthread_cond_signal(&cond_nonempty);
+
+		temp = temp->next_node;
+	}
+	pthread_mutex_unlock(&list_mtx);
+
+	pthread_t *tids;
+	if (worker_threads > THREAD_NUMBER) 
+	{ /* Avoid too many threads */
+		printf("Number of threads should be up to 100\n"); 
+   		free(dirname);
+		free(server_ip);
+		return -4;	
+	}
+
+	if ((tids = (pthread_t*) malloc(worker_threads * sizeof(pthread_t))) == NULL) 
+	{
+		fprintf(stderr,"Error in malloc in dropbox_client.c \n");
+		return -5;
+	}
+	printf("THREAD_CREATION\n");
+	int err;
+	for (int i=0 ; i < worker_threads ; i++)
+	{	err = pthread_create(tids+i, NULL, worker, NULL);
+		if (err != 0) 
+		{
+			fprintf(stderr, "Error in pthread_create in dropbox_client.c\n");
+			free(dirname);
+			free(server_ip);
+			return -6;	
+		} 
 	}
 
     int fd_max = 0;
@@ -171,12 +268,16 @@ int main(int argc , char* argv[])
     	read_set = set;
 
     	int ready = 0;
-    	//ready = select(fd_max+1, &read_set, NULL, NULL, NULL);
-      	if ( (ready = select(fd_max+1, &read_set, NULL, NULL, NULL) ) < 0)
+
+    	ready = select(fd_max+1, &read_set, NULL, NULL, NULL) ;
+      	if ( (ready < 0) && (errno != EINTR) )
         {
         	fprintf(stderr,"Error in select\n");
           	break;
         }
+        else if (ready <= 0) 
+        	continue;
+
         for(int fd=0; fd <= fd_max ; fd++)
         {
         	if (FD_ISSET(fd,&read_set))
@@ -206,7 +307,7 @@ int main(int argc , char* argv[])
         		}
         		else
         		{	
-        			if (service_request(fd,&clients) <= 0)
+        			if (service_request(fd,&clients,dirname) <= 0)
         			{
         				FD_CLR(fd,&set);
         				if (fd == fd_max)
@@ -218,315 +319,51 @@ int main(int argc , char* argv[])
         }
     }
 
-	if ( log_off(serverptr,IPstring,port) < 0)
+	if ( log_off(serverptr,IPstring,ip,port) < 0)
 	{
     	destroy_list(&clients);
+    	destroy_buffer(&shared_buffer);
     	close(listening_sock);
 		free(dirname);
 		free(server_ip);
+		free(tids);
 		return -3;		
 	}    
 
+
+	for (int i = 0 ; i < worker_threads ; i++)
+	{	
+		int l = pthread_cancel(*(tids+i));
+		if (l == 0) 
+			printf("Thread %d cancelled\n",i);	
+		
+		err = pthread_join(*(tids+i), NULL);
+		if (err != 0)
+		{
+			fprintf(stderr,"Error in pthread_join in dropbox_client.c\n");
+			break;
+		}
+	}
+	pthread_cond_destroy(&cond_nonempty);
+	pthread_cond_destroy(&cond_nonfull);
+	pthread_mutex_destroy(&mtx);
+	pthread_mutex_destroy(&list_mtx);
+    
     destroy_list(&clients);
+    destroy_buffer(&shared_buffer);
     close(listening_sock);
 	free(dirname);
 	free(server_ip);
+	free(tids);
 	return 0;
 }
 
-int get_clients(struct sockaddr *serverptr,char* IPstring,uint16_t port,client_list** clients)
-{
-	int bytes;
-	int sock_request;
-	char buf[64];
 
-	if ((sock_request = socket(PF_INET, SOCK_STREAM, 0)) < 0)
-   	{
-   		fprintf(stderr,"Error in socket\n");
-    	return -1;
-   	}
-
-    if (connect(sock_request, serverptr, sizeof(struct sockaddr_in)) < 0)
-    {
-    	fprintf(stderr,"Error in connect\n");
-    	close(sock_request);
-    	return -1;
-    }
-
-    uint32_t ip = inet_addr(IPstring);
-    
-    strcpy(buf,"GET_CLIENTS");
-
-    if ( (bytes = write(sock_request ,buf,strlen(buf)+1) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write.\n");
-    	close(sock_request);
-    	return -1;
-    }
-
- 	char request[32];
-	int i = 0 , spaces = 0;
-	char ch = 'z';
-
-	while(ch != '\0') 
-	{	bytes = read(sock_request,request + i ,1);
-		if (bytes < 0)
-		{	
-			fprintf(stderr,"Error in read in service_request.\n");
-			close(sock_request);
-			return -2;
-		}
-		if (bytes == 0)
-			return -1;
-		ch = request[i];
-		i++;
-	}
-	//request[i-1] = '\0';
-	printf("REQUEST: %s\n",request );
-
-	char *token;
-   
-   	token = strtok(request," ");
-
-   	if (token != NULL)
-   		token = strtok(NULL," ");
-   	else
-   	{
-   		printf("Something went wrong, invalid message from server.\n");
-   		close(sock_request);
-   		return -3;
-   	}
-
-
-   	int N = atoi(token);
-   	printf("CLIENTS: %d\n",N);
-
-   	for(i = 0 ; i < N ; i++)
-   	{
-   		uint32_t client_ip;
-    	uint16_t client_port;
-
-    	bytes = read(sock_request,&client_ip,sizeof(client_ip));
-    	if (bytes < 0)
-    	{
-			fprintf(stderr,"Error in read\n");
-			close(sock_request);
-			return -2;    		
-    	}
-
-    	bytes = read(sock_request,&client_port,sizeof(client_port));
-    	if (bytes < 0)
-    	{
-			fprintf(stderr,"Error in read\n");
-		    close(sock_request);
-			return -2;    		
-    	}
-
-    	client_ip = ntohl(client_ip);
-    	client_port = ntohs(client_port);
-
-    	if ((ip != client_ip) || (port != client_port))
-    		insert_node(clients,client_port,client_ip);
-
-   	} 
-   	printf("client-nodes: %d\n",counter_nodes(*clients));
-	close(sock_request );
-
-	return 0;	
-}
-
-int log_on(struct sockaddr *serverptr,char* IPstring,uint16_t port)
-{
-	char buf[64];
-	int sock_request;
-
-	if ((sock_request = socket(PF_INET, SOCK_STREAM, 0)) < 0)
-   	{
-   		fprintf(stderr,"Error in socket in log_on.\n");
-    	return -1 ;
-   	}
-
-    if (connect(sock_request, serverptr, sizeof(struct sockaddr_in)) < 0)
-    {
-    	fprintf(stderr,"Error in connect in log_on.\n");
-    	close(sock_request); 
-    	return -1 ;
-    }	
-
-	//printf("Connecting to %s port %d\n", server_ip, port);
-    uint32_t ip = inet_addr(IPstring);
-
-    strcpy(buf, "LOG_ON");
-
-    int bytes =0;
-    if ( (bytes = write(sock_request ,buf,strlen(buf)+1) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_on.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-
-    printf("IP: %s port: %d\n",IPstring,port );
-
-    uint32_t u_ip = htonl(ip);
-    printf("%d\n",u_ip );
-
-    if ( (bytes = write(sock_request , &u_ip, sizeof(u_ip)) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_on.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-
-    uint16_t u_port =  htons(port);
-
-
-    if ( ( bytes = write(sock_request , &u_port, sizeof(u_port)) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_on.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-    printf("%d %d\n",ip,port );
-
-	close(sock_request ); 
-	return 0;
-}
-
-int log_off(struct sockaddr *serverptr,char* IPstring,uint16_t port)
-{
-	char buf[64];
-	int sock_request;
-	printf("IN LOG_OFF\n");
-	if ((sock_request = socket(PF_INET, SOCK_STREAM, 0)) < 0)
-   	{
-   		fprintf(stderr,"Error in socket in log_off.\n");
-    	return -1 ;
-   	}
-
-    if (connect(sock_request, serverptr, sizeof(struct sockaddr_in)) < 0)
-    {
-    	fprintf(stderr,"Error in connect in log_off.\n");
-    	close(sock_request); 
-    	return -1 ;
-    }	
-
-	//printf("Connecting to %s port %d\n", server_ip, port);
-    uint32_t ip = inet_addr(IPstring);
-
-    strcpy(buf, "LOG_OFF");
-
-    int bytes =0;
-    if ( (bytes = write(sock_request ,buf,strlen(buf)+1) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_off.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-
-    printf("IP: %s port: %d\n",IPstring,port );
-
-    uint32_t u_ip = htonl(ip);
-    printf("%d\n",u_ip );
-
-    if ( (bytes = write(sock_request , &u_ip, sizeof(u_ip)) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_off.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-
-    uint16_t u_port =  htons(port);
-
-
-    if ( ( bytes = write(sock_request , &u_port, sizeof(u_port)) ) < 0 )
-    {
-    	fprintf(stderr, "Error in write in log_off.\n");
-    	close(sock_request );
-    	return -1 ;
-    }
-    printf("%d %d\n",ip,port );
-
-	close(sock_request ); 
-	return 0;
-}
-
-int user_on(int socket,client_list** clients)
-{
-	uint32_t ip;
-    uint16_t port;
-
-    int read_bytes;
-
-    read_bytes = read(socket,&ip,sizeof(ip));
-    if (read_bytes < 0)
-    {
-		fprintf(stderr,"Error in read in user_on\n");
-		return -2;    		
-   	}
-
-    read_bytes = read(socket,&port,sizeof(port));
-    if (read_bytes < 0)
-    {
-		fprintf(stderr,"Error in read in user on\n");
-		return -2;    		
-   	}
-
-   	ip = ntohl(ip);
-    port = ntohs(port);
-
-    if (search_list(*clients,port,ip) == NULL)
-    	insert_node(clients,port,ip);
-
-    struct in_addr ip_addr;
-    ip_addr.s_addr = ip;
-
-    printf("USER_ON %s %d\n",inet_ntoa(ip_addr),port);
-    return 0;
-}
-
-int user_off(int socket,client_list** clients)
-{
-	uint32_t ip;
-    uint16_t port;
-
-    int read_bytes;
-
-    read_bytes = read(socket,&ip,sizeof(ip));
-    if (read_bytes < 0)
-    {
-		fprintf(stderr,"Error in read in user_on\n");
-		return -2;    		
-   	}
-
-    read_bytes = read(socket,&port,sizeof(port));
-    if (read_bytes < 0)
-    {
-		fprintf(stderr,"Error in read in user on\n");
-		return -2;    		
-   	}
-
-   	ip = ntohl(ip);
-    port = ntohs(port);
-
-    if (search_list(*clients,port,ip) != NULL)
-    	insert_node(clients,port,ip);
-    else
-    	printf("The user is not in the list\n");
-
-    struct in_addr ip_addr;
-    ip_addr.s_addr = ip;
-
-    printf("USER_OFF %s %d\n",inet_ntoa(ip_addr),port);
-    return 0;
-}
-
-int service_request(int socket ,client_list** clients)
+int service_request(int socket ,client_list** clients,char* dir)
 {
 	char request[16];
 	int i = 0;
 	int read_bytes = 0;
-	int insert = 0;
 	char ch = 'z';
 
 	while(ch != '\0')
@@ -541,17 +378,29 @@ int service_request(int socket ,client_list** clients)
 		ch = request[i];
 		i++;
 	}
-
+	printf("%s\n",request);
 	if ( !strcmp(request,"USER_ON"))
 	{
-		if (user_on(socket,clients) < 0)
+		if (user_on(socket,clients,&shared_buffer) < 0)
 			return -1;
+	}
+	else if ( !strcmp(request,"GET_FILE_LIST"))
+	{
+		if (responde_get_file_list(socket,dir) < 0)
+			return -1;		
+	}
+	else if ( !strcmp(request,"RESPONDE_GET_FILE"))
+	{
+		//if (get_file(socket,clients) < 0)
+		//	return -1;	
 	}
 	else if ( !strcmp(request,"USER_OFF"))
 	{
 		if (user_off(socket,clients) < 0)
 			return -1;
 	}
+	else
+		printf("Invalid request.\n");
 
 	return 0;
 }
