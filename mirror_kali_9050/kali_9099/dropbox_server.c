@@ -24,7 +24,7 @@ extern int errno;
 #include "list_interface.h"
 #include "server_functions.h"
 
-#define CONNECTIONS 30
+#define CONNECTIONS 10
 
 int terminate = 0;
 

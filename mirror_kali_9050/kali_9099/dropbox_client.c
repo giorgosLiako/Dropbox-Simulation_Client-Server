@@ -28,7 +28,7 @@ extern int errno;
 #include "client_functions.h"
 #include "buffer_interface.h"
 
-#define CONNECTIONS 30
+#define CONNECTIONS 10
 #define THREAD_NUMBER 100
 
 int terminate = 0;

@@ -179,7 +179,7 @@ int send_get_file_list(buffer_item* item ,char* mirror)
 	
 		counter++;
 	}
-
+	
 	pthread_mutex_lock(&print_mtx);
 	
 	if (counter == N)
@@ -357,8 +357,8 @@ int send_get_file(buffer_item* item, client_list* clients,char* mirror)
 
    		int fd = open(path,O_CREAT | O_WRONLY , 0777);
    		if (fd < 0)
-   		{	printf("%s\n",path);
-   			fprintf(stderr,"Error in open in send_get_file.\n");
+   		{
+   			fprintf(stderr,"Error in open in send_get_file.");
    			return -3;
    		}
 
