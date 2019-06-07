@@ -280,6 +280,7 @@ int main(int argc , char* argv[])
 		fprintf(stderr,"Error in malloc in dropbox_client.c \n");
 		return -5;
 	}
+	/*create the threads */
 	printf("THREAD_CREATION\n");
 	int err;
 	for (int i=0 ; i < worker_threads ; i++)
@@ -292,21 +293,21 @@ int main(int argc , char* argv[])
 			return -6;	
 		} 
 	}
-
+	/*always have in variable fd_max the max file descriptor*/
     int fd_max = 0;
     fd_set set , read_set;
-    if (listening_sock > fd_max)
+    if (listening_sock > fd_max) 
     	fd_max = listening_sock;
 
-    FD_ZERO(&set);
-    FD_SET(listening_sock , &set);
+    FD_ZERO(&set); /*initialize the set*/
+    FD_SET(listening_sock , &set); /*put listening sock in set*/
 
     while(terminate == 0)
     {
     	read_set = set;
 
     	int ready = 0;
-
+    	/*select connections from the read_set when a file descriptor is ready*/
     	ready = select(fd_max+1, &read_set, NULL, NULL, NULL) ;
       	if ( (ready < 0) && (errno != EINTR) )
         {
@@ -318,17 +319,17 @@ int main(int argc , char* argv[])
 
         for(int fd=0; fd <= fd_max ; fd++)
         {
-        	if (FD_ISSET(fd,&read_set))
+        	if (FD_ISSET(fd,&read_set)) /*if fd is ready*/
         	{
-        		if (fd == listening_sock )
-        		{
+        		if (fd == listening_sock ) /*check if fd is the listening sock, so make a new connection*/
+        		{	/*accept the new connection*/
         			int fd_client = accept(listening_sock, NULL, NULL);
         			FD_SET(fd_client,&set);
         			if (fd_client > fd_max)
         			{
         				fd_max = fd_client;
         			}
-        				
+        			/*make unblock the connection with options*/
         			int opts = fcntl(fd,F_GETFL);
 					if (opts < 0)
 					{
@@ -344,19 +345,19 @@ int main(int argc , char* argv[])
 					}
         		}
         		else
-        		{	
+        		{	/*if fd is not the listening socket , service the request that came from another client or the server*/
         			if (service_request(fd,&clients,dirname) <= 0)
         			{
-        				FD_CLR(fd,&set);
+        				FD_CLR(fd,&set); /*remove fd from the set*/
         				if (fd == fd_max)
         					fd_max--;
-        				close(fd);
+        				close(fd); /*close the connection*/
         			}
         		}
         	}
         }
     }
-
+    /*the client has received SIGINT signal so send a log_off request to server*/
 	if ( log_off(serverptr,IPstring,ip,port) < 0)
 	{
     	destroy_list(&clients);
@@ -367,24 +368,26 @@ int main(int argc , char* argv[])
 		free(tids);
 		return -3;		
 	}    
-
+	/*cancel all the creatd threads*/
 	int cancelled_threads = 0;
 	for (int i = 0 ; i < worker_threads ; i++)
 	{	
-		int l = pthread_cancel(*(tids+i));
+		int l = pthread_cancel(*(tids+i)); /*cancel the thread*/
 		if (l == 0) 
 			cancelled_threads++;	
 		
-		err = pthread_join(*(tids+i), NULL);
+		err = pthread_join(*(tids+i), NULL); /*and join to the main thread*/
 		if (err != 0)
 		{
 			fprintf(stderr,"Error in pthread_join in dropbox_client.c\n");
 			break;
 		}
 	}
+
 	if (cancelled_threads == worker_threads)
 		printf("All threads have been canceled.\n");
 
+	/*clean the memory*/
 	pthread_cond_destroy(&cond_nonempty);
 	pthread_cond_destroy(&cond_nonfull);
 	pthread_mutex_destroy(&buffer_mtx);
@@ -398,10 +401,11 @@ int main(int argc , char* argv[])
 	free(dirname);
 	free(server_ip);
 	free(tids);
+
 	return 0;
 }
 
-
+/*function to serve a request from another client or from server */
 int service_request(int socket ,client_list** clients,char* dir)
 {
 	char request[16];
@@ -409,6 +413,7 @@ int service_request(int socket ,client_list** clients,char* dir)
 	int read_bytes = 0;
 	char ch = 'z';
 
+	/*read the request*/
 	while(ch != '\0')
 	{	read_bytes = read(socket,request + i ,1);
 		if (read_bytes < 0)
@@ -423,22 +428,22 @@ int service_request(int socket ,client_list** clients,char* dir)
 	}
 
 	if ( !strcmp(request,"USER_ON"))
-	{
+	{	/*service user on request which is received from server */
 		if (user_on(socket,clients,mirror) < 0)
 			return -1;
 	}
 	else if ( !strcmp(request,"GET_FILE_LIST"))
-	{
+	{	/*service get file list request which is received from another client */
 		if (responde_get_file_list(socket,dir) < 0)
 			return -1;		
 	}
 	else if ( !strcmp(request,"GET_FILE"))
-	{
+	{	/*servise get file request which is received from another client */
 		if (responde_get_file(socket,clients,dir) < 0)
 			return -1;	
 	}
 	else if ( !strcmp(request,"USER_OFF"))
-	{
+	{	/*servise user off request which is received from server */
 		if (user_off(socket,clients) < 0)
 			return -1;
 	}
